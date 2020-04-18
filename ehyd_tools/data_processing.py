@@ -1,5 +1,3 @@
-from matplotlib.gridspec import GridSpec
-
 __author__ = "David Camhy, Markus Pichler"
 __copyright__ = "Copyright 2017, University of Technology Graz"
 __credits__ = ["David Camhy", "Markus Pichler"]
@@ -7,22 +5,25 @@ __license__ = "MIT"
 __version__ = "1.0.0"
 __maintainer__ = "David Camhy, Markus Pichler"
 
-from pandas import Timedelta, DataFrame, isna, DatetimeIndex, Series
+from pandas import Timedelta, DataFrame, isna, Series, DateOffset
 from numpy import NaN
-from pandas.tseries.offsets import _delta_to_tick as delta_to_freq
 from warnings import warn
-from matplotlib.pyplot import subplots, subplot
+from matplotlib.pyplot import subplots
+
+
+def start_end_date(series):
+    return series.index[[0, -1]].tolist()
 
 
 def year_delta(years):
     """
     return a timedelta object for a given number of years
 
-    :type years: float
-    :param years: number of years
+    Args:
+        years (float): number of years
 
-    :return: time period
-    :rtype: pd.Timedelta
+    Returns:
+        pandas.Timedelta: time period
     """
     return Timedelta(days=365.25) * years
 
@@ -31,11 +32,11 @@ def data_validation(series):
     """
     add gaps sum & nan sum to the time series
 
-    :type series: pd.Series
-    :param series:
+    Args:
+        series (pandas.Series): time-series
 
-    :return: tags with columns 'nans', 'gaps', ...
-    :rtype: pd.DataFrame
+    Returns:
+        pandas.DataFrame: tags with columns 'nans', 'gaps', ...
     """
     ts = series.copy()
     ts = ts.append(Series(index=[ts.index[0].replace(day=1, month=1, hour=0, minute=0),
@@ -53,12 +54,13 @@ def data_validation(series):
 
 def data_availability(tags):
     """
+    get availability based on the validation tags
 
-    :param tags: errors tagged as true
-    :type tags: pd.DataFrame
+    Args:
+        tags (pandas.DataFrame): errors tagged as true (see function data_validation)
 
-    :return: availability
-    :rtype: pd.Series
+    Returns:
+        pandas.Series: availability
     """
     return ~tags.any(axis=1)
 
@@ -68,63 +70,59 @@ def max_10a(availability):
     get the minimal gaps and minimal nan
     and take the latest possible time span
 
-    :param availability: series with available data tagged as True
-    :type availability: pd.Series[True]
+    Args:
+        availability (pandas.Series[bool]): series with available data tagged as True
 
-    :rtype: list[pd.datetime]
-    :return: start & end time of most available time span
+    Returns:
+        tuple[pandas.Timestamp, pandas.Timestamp]: start & end time of most available time span
     """
-    window = delta_to_freq(year_delta(years=10))
+
+    window = year_delta(years=10)
     avail_sum = availability.rolling(window).sum()
 
-    maximums = avail_sum == avail_sum.max()
-
-    end = maximums.index[-1]
-    start = end.replace(year=end.year - 10)
+    end = avail_sum[::-1].idxmax()
+    start = end - DateOffset(years=10)
     return start, end
 
 
 def check_period(series):
     """
-    calculate the period of the series
+    check if the period of the series is at least 10 years long
 
-    :param series: data
-    :type series: pd.Series
+    Warnings:
+        UserWarning - if the series is shorter
 
-    :return: period of the series
-    :rtype: pd.Timedelta
+    Args:
+        series (pandas.Series): time-series
     """
-    if not is_longer(series, years=9.99):
-        warn('Series not longer than 10 years!')
+    if not is_longer(series, years=10):
+        print('WARNING: The Series is only {:.1f} < 10 years long!'.format((series.index[-1] - series.index[0]) / Timedelta(days=365)))
 
 
 def is_longer(series, years):
     """
-    calculate the period of the series
+    check if the period of the series is at least x years long
 
-    :param series: data
-    :type series: pd.Series
+    Args:
+        series (pandas.Series): time-series
+        years (int): number of years to compare with
 
-    :param years: number of years
-    :type years: float
-
-    :return: whether the series is longer
-    :rtype: bool
+    Returns:
+        bool: whether the series is longer
     """
-    return (series.index[-1] - series.index[0]) > year_delta(years=years)
+    return series.index[0] + DateOffset(years=years) <= series.index[-1]
+    # return (series.index[-1] - series.index[0]) > year_delta(years=years)
 
 
-def rain_plot(series, availability, fn):
+def rain_figure(series, availability):
     """
-    monthly sum bar plot
+    creates a monthly sum bar plot
 
-    :param series: data
-    :type series: pd.Series
-
-    :param fn: path + filename of the resulting plot
-    :type fn: str
+    Args:
+        series (pandas.Series): time-series
+        availability (pandas.Series): availability
+        fn (str): path + filename of the resulting plot
     """
-
     if is_longer(series, years=15):
         freq = 'Y'
         freq_long = 'Jahr'
@@ -163,15 +161,50 @@ def rain_plot(series, availability, fn):
     ax.set_xlabel('Zeit')
     fig.tight_layout()
     fig.subplots_adjust(hspace=0)
+    return fig, ax
+
+
+def rain_plot(series, availability, fn):
+    """
+    creates a monthly sum bar plot
+
+    Args:
+        series (pandas.Series): time-series
+        availability (pandas.Series): availability
+        fn (str): path + filename of the resulting plot
+    """
+    fig, ax = rain_figure(series, availability)
     # fig.show()
     fig.savefig(fn)
 
 
-def statistics(series, availability, availability_cut=0.2):
-    sums = series.resample('Y').sum()
-    avail = availability.resample('Y').sum() / (year_delta(1) / series.index.freq)
+def create_statistics(series, availability, availability_cut=0.2):
+    """
+    creates basic (maximum, minimum and mean) yearly statistics of the time-series
 
-    sums[avail < availability_cut] = NaN
+    Args:
+        series (pandas.Series): time-series
+        availability (pandas.Series): availability
+        availability_cut (float): minimal availability for creating a yearly statistic
+
+    Returns:
+        dict: of the yearly statistics
+    """
+    sums = series.resample('Y').sum()
+    avail_sum = availability.resample('Y').sum()
+
+    base_freq = series.index.freq
+    yearly_index = avail_sum.index
+    delta_per_year = yearly_index - (yearly_index - DateOffset(years=1))
+    avail_full = delta_per_year / base_freq
+    avail = avail_sum / avail_full  # type: Series
+    if (avail < availability_cut).all():
+        print('ATTENTION: only very small data availability! The statistic may be not very meaningful.')
+        if (avail < 0.1).all():
+            return dict()
+        sums[avail < 0.1] = NaN
+    else:
+        sums[avail < availability_cut] = NaN
 
     stats = dict()
     stats['maximum'] = (sums.max(), sums.idxmax(), avail.loc[sums.idxmax()])
